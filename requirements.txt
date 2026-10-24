@@ -1,0 +1,6 @@
+# Keep the existing CUDA-enabled torch build; this file does not select CUDA wheels.
+torch>=2.9,<3
+numpy>=2.0,<3
+Pillow>=11,<13
+PyYAML>=6,<7
+huggingface_hub>=0.34,<3

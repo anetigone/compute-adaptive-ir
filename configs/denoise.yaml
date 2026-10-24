@@ -1,0 +1,54 @@
+# Initial engineering protocol: DIV2K HR only, source-image 640/80/80 split.
+# This is separate from the BSD400+WED / CBSD68+Urban100 paper protocol.
+seed: 20261023
+device: auto
+cpu_threads: 4
+output_root: outputs
+
+model:
+  name: reusable_refiner
+  width: 24
+  block_counts: [1, 1, 2, 1, 1]
+  steps: 4
+
+data:
+  source: huggingface
+  root: data_cache
+  hf_repo: dwchoi/div2k800-ffhq1000
+  hf_prefix: DIV2K_train_HR
+  revision: main  # Resolved to an immutable Hub commit in each manifest.
+  hf_endpoint: null  # Uses HF_ENDPOINT if set, otherwise huggingface.co.
+  hf_timeout: 20
+  split_ratios: [0.8, 0.1, 0.1]
+  seed: 20261023
+  max_images: null  # Per final role; selection occurs after the full split.
+  train_patch: 128
+  samples_per_image: 1
+  eval_mode: center_crop
+  eval_crop: 256
+  train_sigmas: [15, 25, 50]
+  eval_sigmas: [15, 25, 50]
+  eval_seed: 20261023
+  noise_protocol: clip_uint8
+
+train:
+  max_steps: 20000
+  warmup_steps: 200
+  batch_size: 4
+  grad_accumulation: 1
+  num_workers: 0  # Safe Windows default; increase after measuring decode cost.
+  lr: 0.0002
+  weight_decay: 0.0
+  grad_clip: 1.0
+  amp: true
+  deterministic: false
+  exit_weights: null  # Uniform over all available training exits.
+  log_every: 20
+  val_every: 500
+  save_every: 500
+  val_max_samples: 0  # 0 = all validation source images x eval sigmas.
+
+eval:
+  exits: null  # Baseline: [1]; shared model: [1,2,3,4,6,8].
+  warmup: 5
+  repeats: 3
