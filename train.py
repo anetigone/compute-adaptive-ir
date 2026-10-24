@@ -34,6 +34,32 @@ def make_scheduler(optimizer: torch.optim.Optimizer, total_steps: int, warmup_st
     return torch.optim.lr_scheduler.LambdaLR(optimizer, multiplier)
 
 
+def optimizer_step(optimizer, scaler, parameters, max_norm: float) -> float | None:
+    """Return the unscaled norm, or None if GradScaler skipped an overflow."""
+    scaler.unscale_(optimizer)
+    gradients = [parameter.grad for parameter in parameters if parameter.grad is not None]
+    if not gradients:
+        raise RuntimeError("No gradients were produced")
+    # FP32 norm reduction can itself overflow even when every gradient is finite.
+    norm = torch.linalg.vector_norm(torch.stack([
+        torch.linalg.vector_norm(gradient.detach(), dtype=torch.float64) for gradient in gradients
+    ])).item()
+    if not math.isfinite(norm):
+        if not scaler.is_enabled():
+            raise FloatingPointError("Nonfinite unscaled gradient with AMP disabled")
+        # unscale_ recorded inf/nan. step skips the optimizer; update lowers scale.
+        # Do not clip nonfinite gradients or advance the learning-rate scheduler.
+        scaler.step(optimizer)
+        scaler.update()
+        return None
+    coefficient = min(1.0, max_norm / (norm + 1e-6))
+    for gradient in gradients:
+        gradient.mul_(coefficient)
+    scaler.step(optimizer)
+    scaler.update()
+    return norm
+
+
 class TrainingBatches:
     """Epoch permutation and augmentation are independent of model/global RNG."""
 
@@ -111,6 +137,7 @@ def train(config: dict[str, Any], manifest_path: str | Path, output_dir: str | P
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     manifest_hash = file_sha256(manifest_path)
     step, best_psnr, data_state = 0, -math.inf, None
+    amp_skipped_updates = 0
     if resume is not None:
         saved = load_checkpoint(resume)
         if saved["resume_signature"] != _resume_signature(config):
@@ -122,6 +149,7 @@ def train(config: dict[str, Any], manifest_path: str | Path, output_dir: str | P
         scheduler.load_state_dict(saved["scheduler"])
         scaler.load_state_dict(saved["scaler"])
         step, best_psnr, data_state = saved["step"], saved["best_psnr"], saved["data_position"]
+        amp_skipped_updates = saved.get("amp_skipped_updates", 0)
         restore_rng_state(saved["rng"])
     target_step = total_steps if stop_after is None else min(total_steps, int(stop_after))
     if target_step <= step:
@@ -142,6 +170,7 @@ def train(config: dict[str, Any], manifest_path: str | Path, output_dir: str | P
     print(json.dumps({"model": config["model"]["name"], "device": str(device), "from_step": step,
                       "to_step": target_step, "parameters": description["parameters"]}), flush=True)
     start = time.perf_counter()
+    consecutive_overflows = 0
     log_path = output_dir / "train.jsonl"
     if resume is not None and log_path.exists():
         # A crash can leave logged updates newer than the last durable checkpoint.
@@ -166,6 +195,7 @@ def train(config: dict[str, Any], manifest_path: str | Path, output_dir: str | P
                 "manifest_path": str(manifest_path), "manifest_sha256": manifest_hash,
                 "model": model.state_dict(), "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(), "scaler": scaler.state_dict(),
+                "amp_skipped_updates": amp_skipped_updates,
                 "step": step, "best_psnr": best_psnr, "data_position": batches.state_dict(),
                 "rng": capture_rng_state(), "environment": environment_info(device)}
 
@@ -190,17 +220,32 @@ def train(config: dict[str, Any], manifest_path: str | Path, output_dir: str | P
                     raise FloatingPointError(f"Nonfinite loss at optimizer step {step + 1}")
                 scaler.scale(loss / accumulation).backward()
                 mean_loss += float(loss.detach()) / accumulation
-            scaler.unscale_(optimizer)
-            grad_norm = nn.utils.clip_grad_norm_(trainable, float(settings.get("grad_clip", 1.0)))
-            if not torch.isfinite(grad_norm).item():
-                raise FloatingPointError(f"Nonfinite gradient at optimizer step {step + 1}")
-            scaler.step(optimizer)
-            scaler.update()
+            scale_before = scaler.get_scale()
+            grad_norm = optimizer_step(optimizer, scaler, trainable, float(settings.get("grad_clip", 1.0)))
+            if grad_norm is None:
+                amp_skipped_updates += 1
+                consecutive_overflows += 1
+                event = {"event": "amp_overflow", "step": step, "attempted_step": step + 1,
+                         "amp_scale_before": scale_before, "amp_scale_after": scaler.get_scale(),
+                         "consecutive_overflows": consecutive_overflows,
+                         "amp_skipped_updates": amp_skipped_updates}
+                log.write(json.dumps(event) + "\n")
+                log.flush()
+                print(json.dumps(event), flush=True)
+                if consecutive_overflows >= 16:
+                    raise FloatingPointError(
+                        f"16 consecutive AMP gradient overflows before step {step + 1}; "
+                        "check loss/model stability. The optimizer and scheduler were not advanced."
+                    )
+                continue
+            consecutive_overflows = 0
             scheduler.step()
             step += 1
             row: dict[str, Any] = {"step": step, "loss_l1": mean_loss, "lr": lr_used,
                                    "grad_norm": float(grad_norm), "elapsed_seconds": time.perf_counter() - start,
                                    "data_epoch": batches.epoch, "data_batch_offset": batches.batch_offset}
+            if amp_enabled:
+                row.update(amp_scale=scaler.get_scale(), amp_skipped_updates=amp_skipped_updates)
             improved = False
             # Checkpoint selection follows a fixed schedule. An interruption at
             # an arbitrary step must not introduce an extra "best" candidate.
@@ -224,6 +269,7 @@ def train(config: dict[str, Any], manifest_path: str | Path, output_dir: str | P
                "completed_schedule": step == total_steps,
                "best_validation_psnr": best_psnr if math.isfinite(best_psnr) else None,
                "elapsed_seconds_this_invocation": time.perf_counter() - start,
+               "amp_skipped_updates": amp_skipped_updates,
                "last_checkpoint": str(checkpoint_path), "gain_head_trained": False})
     return checkpoint_path
 

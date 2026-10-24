@@ -85,6 +85,8 @@ $py = 'H:\anaconda3\envs\py312\python.exe'
 
 训练默认 AdamW、L1 重建、四步均匀深监督（原型）、FP16 AMP、梯度裁剪。收益头默认冻结，本轮不训练停止策略。`--max-steps` 表示优化器更新总数，梯度累积微批次数由 `train.grad_accumulation` 设置。默认 `num_workers=0` 适配 Windows；建议先测瓶颈再增加。
 
+AMP 出现非有限梯度时，由 GradScaler 跳过该批次的优化器更新并降低 loss scale，日志记录 `amp_overflow`。跳过不增加成功更新数，不推进学习率；下一批次继续训练。连续 16 次溢出仍报错，避免掩盖持续发散。非有限 loss 或关闭 AMP 时的非有限梯度仍直接报错。梯度范数采用 FP64 规约，避免范数求和本身在 FP32 下溢出。正常 AMP 日志包含当前 scale 和累计跳过数。
+
 ```powershell
 # 总计划2000步，只运行到第100步后退出，不改变2000步学习率计划
 & $py run.py train --model reusable_refiner --name resumable --max-images 4 --max-steps 2000 --stop-after 100
