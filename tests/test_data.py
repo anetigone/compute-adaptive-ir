@@ -1,4 +1,4 @@
-"""Data identities, splitting and stochastic inputs are part of the protocol."""
+"""Dataset splits and repeatable denoising inputs."""
 
 import copy
 import json
@@ -25,52 +25,29 @@ class DataContractTests(unittest.TestCase):
     def prepare(self):
         return prepare_data(self.config, self.root)
 
-    def test_manifest_source_roles_and_pixel_content_do_not_overlap(self):
+    def test_file_lists_are_disjoint_and_repeatable(self):
         path = self.prepare()
         manifest = json.loads(path.read_text(encoding="utf-8"))
-        records = manifest["records"]
-        self.assertEqual({role: sum(r["role"] == role for r in records)
-                          for role in ("train", "val", "test")},
+        self.assertEqual({role: len(paths) for role, paths in manifest.items()},
                          {"train": 3, "val": 2, "test": 2})
-        for identity in ("image_id", "source_id", "pixel_sha256"):
-            roles = {}
-            for record in records:
-                roles.setdefault(record[identity], set()).add(record["role"])
-            self.assertTrue(all(len(value) == 1 for value in roles.values()), identity)
-        # Preparation must not depend on filesystem enumeration order.
+        paths = [path for group in manifest.values() for path in group]
+        self.assertEqual(len(paths), len(set(paths)))
         again = json.loads(self.prepare().read_text(encoding="utf-8"))
-        self.assertEqual(records, again["records"])
+        self.assertEqual(manifest, again)
 
-    def test_duplicate_pixels_under_another_filename_cannot_cross_roles(self):
-        source = Path(self.config["data"]["local_dir"])
-        # Re-encoding changes file bytes while preserving source pixels.
-        with Image.open(source / "train" / "image_0.png") as image:
-            image.save(source / "val" / "duplicate.png", compress_level=0)
-        with self.assertRaises(ValueError):
-            self.prepare()
-
-    def test_changed_source_file_is_rejected_before_training_or_evaluation(self):
-        path = self.prepare()
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-        image_path = Path(manifest["records"][0]["path"])
-        with Image.open(image_path) as image:
-            # Different encoding suffices: manifest file hashes protect the
-            # exact immutable inputs even if normalized pixels happen to match.
-            image.save(image_path.with_name("replacement.png"), compress_level=0)
-        image_path.write_bytes(image_path.with_name("replacement.png").read_bytes())
-        with self.assertRaises(ValueError):
-            build_datasets(self.config, path)
-
-    def test_forged_manifest_cannot_reuse_a_source_identity_across_roles(self):
-        path = self.prepare()
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-        train = next(record for record in manifest["records"] if record["role"] == "train")
-        val = next(record for record in manifest["records"] if record["role"] == "val")
-        val["source_id"] = train["source_id"]
-        forged = self.root / "forged_manifest.json"
-        forged.write_text(json.dumps(manifest), encoding="utf-8")
-        with self.assertRaises(ValueError):
-            build_datasets(self.config, forged)
+    def test_flat_images_are_split_before_applying_sample_limit(self):
+        folder = self.root / "pool"
+        folder.mkdir()
+        for index in range(20):
+            Image.new("RGB", (32, 32), (index, 0, 0)).save(folder / f"{index:02d}.png")
+        self.config["data"]["local_dir"] = str(folder)
+        full = json.loads(self.prepare().read_text(encoding="utf-8"))
+        self.assertEqual({role: len(paths) for role, paths in full.items()}, {"train": 16, "val": 2, "test": 2})
+        self.assertEqual(full, json.loads(self.prepare().read_text(encoding="utf-8")))
+        self.config["data"]["max_images"] = 1
+        subset = json.loads(self.prepare().read_text(encoding="utf-8"))
+        for role in full:
+            self.assertEqual(subset[role], full[role][:1])
 
     def test_training_augmentation_is_replayable_but_changes_across_epochs(self):
         manifest = self.prepare()

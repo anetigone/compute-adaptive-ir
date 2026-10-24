@@ -1,6 +1,6 @@
 # 图像恢复初步验证框架
 
-当前包含一个固定预算 NAF 风格 U-Net 基线和一个共享迭代原型，统一进行盲 RGB 高斯去噪训练。每个模型独立一个文件；训练、数据和评估入口共用。更新日期：2026-10-23。
+当前包含一个固定预算 NAF 风格 U-Net 基线和一个共享迭代原型，统一进行盲 RGB 高斯去噪训练。每个模型独立一个文件；训练、数据和评估入口共用。更新日期：2026-10-24。
 
 ## 目录
 
@@ -11,7 +11,7 @@ models/
   reusable_refiner.py        缓存观测特征、共享迭代原型
   __init__.py                build_model 配置工厂
 data/
-  prepare.py                 Hugging Face / 本地目录 → 固定 manifest
+  prepare.py                 下载图片、划分、保存 splits.json
   denoising.py               RGB 裁块、增强、噪声、训练/评估 Dataset
 configs/denoise.yaml         默认配置
 train.py                     多出口 L1、AMP、验证与完整断点
@@ -48,12 +48,12 @@ $py = 'H:\anaconda3\envs\py312\python.exe'
 
 ## 初步数据集：DIV2K HR，通过 Hugging Face 获取
 
-默认只使用 [dwchoi/div2k800-ffhq1000](https://huggingface.co/datasets/dwchoi/div2k800-ffhq1000/blob/main/README.md) 中的 `DIV2K_train_HR/*.png`，不下载 FFHQ、文本提示或 LR 图。通过 `huggingface_hub` 按文件下载，每次解析并记录 commit SHA，后续下载固定该版本。默认原训练 HR 800 张按源图固定划为 **640 训练 / 80 验证 / 80 开发测试**。完整 HR 约 3.3 GB；小样模式只下载选中的 PNG。
+默认只使用 [dwchoi/div2k800-ffhq1000](https://huggingface.co/datasets/dwchoi/div2k800-ffhq1000/blob/main/README.md) 中的 `DIV2K_train_HR/*.png`，不下载 FFHQ、文本提示或 LR 图。通过 `snapshot_download` 下载 HR 图片，然后用固定随机种子划分。默认原训练 HR 800 张固定划为 **640 训练 / 80 验证 / 80 开发测试**。完整 HR 约 3.3 GB；`max_images` 只限制划分后的使用数量，不减少下载量。
 
 这是当前的工程验证协议，与已有文档里的 BSD400+WED / CBSD68+Urban100 正式研究协议分开。DIV2K 原始许可为学术研究使用，图片版权仍归原作者；具体来源和数据契约见 [data/README.md](data/README.md)。
 
 ```powershell
-# 最小真实数据检查：完整角色划分后，每角色选4张，共下载12张PNG
+# 下载HR图片后，每个划分使用4张
 # 两个模型顺序训练20次更新，再分别评估；这是链路检查，不是收敛实验
 & $py run.py compare --name div2k_quick --max-images 4 --max-steps 20
 
@@ -71,7 +71,7 @@ $py = 'H:\anaconda3\envs\py312\python.exe'
 & $py run.py prepare --max-images 4 --endpoint 'https://YOUR_ACCESSIBLE_HF_ENDPOINT'
 ```
 
-端点也可通过 `data.hf_endpoint` 或环境变量 `HF_ENDPOINT` 配置，代码不自动切换镜像。图片和元数据保存在项目内 `data_cache/`，不要求使用系统 Hugging Face 缓存目录。
+端点也可通过 `data.hf_endpoint` 或环境变量 `HF_ENDPOINT` 配置，代码不自动切换镜像。图片和划分列表保存在项目内 `data_cache/`。
 
 本地已有图片时：
 
@@ -79,7 +79,7 @@ $py = 'H:\anaconda3\envs\py312\python.exe'
 & $py run.py compare --name local_quick --local-dir 'G:\path\to\clean_images' --max-steps 20
 ```
 
-支持 `train/val/test`、`train/validation` 或普通图片树。默认训练 patch=128、验证中心裁块=256，图片必须足够大；更小图像应在 YAML 中明确减小裁块。不会自动缩放图片。`max_images` 在完整源图划分之后限额，不改变同一源图的角色。所有方法共用相同测试噪声；启动时核验文件 hash，源图被替换会报错。
+本地目录可使用已分好的 `train/val/test` 三个子目录，或直接提供待划分的图片目录。默认训练 patch=128、验证中心裁块=256，图片必须足够大；更小图像应在 YAML 中明确减小裁块。`max_images` 在划分之后限额，不改变同一图片的角色。所有方法共用相同测试噪声；准备阶段只保存路径列表，不扫描文件或像素 hash。
 
 ## 训练与续训
 
@@ -151,6 +151,6 @@ forward_trajectory(y, steps=None) -> list[Tensor]
 & $py -m unittest discover -s tests -v
 ```
 
-覆盖共享更新梯度、真实提前退出、源图与像素去重、文件完整性、跨方法噪声一致、HF下载范围与commit固定，以及完整续训状态。测试不访问网络，不下载研究数据。
+覆盖共享更新梯度、真实提前退出、数据划分、跨方法噪声一致、HF下载入口，以及完整续训状态。测试不访问网络，不下载研究数据。
 
 2026-10-23 验证记录：21 项 CPU 测试通过；两种默认 C24 模型在 CUDA 上完成 batch=4/patch=128 的四次更新、第二步恢复续训、验证、逐出口质量与实际固定出口计时；另单独验证了 CLI 的 train/resume/eval/compare。工程结果在 `outputs/smoke_default_cuda_20261023/` 和 `outputs/compare_cli_final_20261023/`。这些短程合成图结果仅证明软件链路可用。

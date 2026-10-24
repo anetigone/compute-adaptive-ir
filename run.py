@@ -44,7 +44,7 @@ def _prepare(config, args) -> Path:
     if getattr(args, "endpoint", None):
         config["data"]["hf_endpoint"] = args.endpoint
     path = prepare_data(config, PROJECT_ROOT)
-    print(f"Manifest: {path}", flush=True)
+    print(f"Splits: {path}", flush=True)
     return path
 
 
@@ -113,11 +113,11 @@ def main() -> None:
         sub.add_argument("--config", help="YAML configuration; defaults to configs/denoise.yaml")
         sub.add_argument("--device", choices=("auto", "cpu", "cuda"))
         if command in {"prepare", "train", "compare"}:
-            sub.add_argument("--max-images", type=int, help="Cap images per role after the fixed full split")
+            sub.add_argument("--max-images", type=int, help="Limit each split after downloading; does not reduce downloads")
             sub.add_argument("--local-dir", help="Use an existing local RGB image folder")
             sub.add_argument("--endpoint", help="Explicit Hugging Face endpoint, e.g. an available mirror")
         if command in {"train", "eval", "compare"}:
-            sub.add_argument("--manifest", help="Use an already prepared immutable manifest")
+            sub.add_argument("--manifest", help="Use an existing splits.json file")
         if command in {"train", "compare", "smoke"}:
             sub.add_argument("--name", help="Run name below output_root")
         if command == "train":

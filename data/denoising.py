@@ -150,36 +150,18 @@ class DenoisingDataset(Dataset):
 def build_datasets(config: dict, manifest_path: Path) -> dict[str, DenoisingDataset]:
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != 1:
-        raise ValueError("Unsupported data manifest schema_version")
-    records = manifest["records"]
-    seen_ids: dict[str, dict] = {}
-    seen_sources: dict[str, dict] = {}
-    seen_pixels: dict[str, dict] = {}
+    # Older runs stored records; new preparations contain only three file lists.
+    records = manifest.get("records")
+    if records is None:
+        records = [{"path": path, "image_id": path, "source_id": path, "role": role}
+                   for role in ("train", "val", "test") for path in manifest[role]]
     for record in records:
-        for field in ("image_id", "source_id", "role", "path", "sha256", "pixel_sha256", "width", "height"):
-            if field not in record:
-                raise ValueError(f"Manifest record is missing required field {field}")
-        if record["role"] not in {"train", "val", "test"}:
-            raise ValueError(f"Unknown manifest role: {record['role']}")
-        for name, field, seen in (("image ID", "image_id", seen_ids), ("source ID", "source_id", seen_sources),
-                                  ("clean source pixels", "pixel_sha256", seen_pixels)):
-            previous = seen.get(record[field])
-            if previous is not None:
-                raise ValueError(f"Duplicate {name} in manifest: {previous['image_id']} ({previous['role']}) and {record['image_id']} ({record['role']})")
-            seen[record[field]] = record
         path = Path(record["path"])
         if not path.is_absolute():
             path = manifest_path.parent / path
         record["path"] = str(path.resolve())
         if not path.is_file():
             raise FileNotFoundError(path)
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(block)
-        if digest.hexdigest() != record["sha256"]:
-            raise ValueError(f"Source file SHA256 mismatch for {record['image_id']}: image bytes changed after manifest preparation")
     merged = dict(manifest.get("config", {}))
     merged.update(data_config(config))
     return {role: DenoisingDataset(records, role, merged) for role in ("train", "val", "test")}

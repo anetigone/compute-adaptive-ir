@@ -16,12 +16,10 @@ data:
   root: data_cache
   hf_repo: dwchoi/div2k800-ffhq1000
   hf_prefix: DIV2K_train_HR
-  revision: main  # Resolved to an immutable Hub commit in each manifest.
   hf_endpoint: null  # Uses HF_ENDPOINT if set, otherwise huggingface.co.
-  hf_timeout: 20
   split_ratios: [0.8, 0.1, 0.1]
   seed: 20261023
-  max_images: null  # Per final role; selection occurs after the full split.
+  max_images: null  # Limit each split after downloading; does not reduce downloads.
   train_patch: 128
   samples_per_image: 1
   eval_mode: center_crop
